@@ -4,4 +4,4 @@ The conversation between two philosophers represented by different LLMs.
 
 ## Demo
 
-![Demo](data/demo.gif)
+![Demo](https://github.com/CuriousDima/silicon-symposium/blob/main/data/demo.gif?raw=true)
