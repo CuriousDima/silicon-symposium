@@ -1,0 +1,10 @@
+[project]
+name = "silicon-symposium"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "litellm>=1.81.0",
+    "rich>=14.2.0",
+]
