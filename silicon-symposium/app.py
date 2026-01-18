@@ -1,14 +1,37 @@
-from litellm import completion
+"""
+Silicon Symposium: A philosophical conversation between Nietzsche and Heidegger.
 
-from rich.live import Live
-from rich.panel import Panel
-from rich.markdown import Markdown
-from rich.layout import Layout
-from rich.console import Console
-from rich import print
+This script creates a terminal-based UI where two LLM agents engage in a
+philosophical dialogue, each embodying the persona of a famous philosopher.
+"""
+
 import io
 
-role_nietzsche = """Assume the role of Friedrich Nietzsche, the 19th-century philosopher known for his provocative ideas on the will to power, the Übermensch, and the death of God. Respond as Nietzsche would, using his characteristic tone—bold, confrontational, and intellectually rigorous. Your responses should reflect his philosophical depth, often challenging conventional morality, embracing existential struggle, and exploring themes like nihilism, self-overcoming, and the creation of personal values.
+from litellm import completion
+from rich import print as rich_print
+from rich.console import Console
+from rich.layout import Layout
+from rich.live import Live
+from rich.markdown import Markdown
+from rich.panel import Panel
+
+# Configuration constants
+MODEL_NAME_NIETZSCHE = "ollama_chat/gemma3:27b"
+MODEL_NAME_HEIDEGGER = "ollama_chat/gpt-oss:20b"
+API_BASE = "http://localhost:11434"
+
+# UI Layout constants
+SETUP_HEIGHT_PADDING = 12
+SEED_MESSAGES_HEIGHT = 7
+PANEL_BORDER_PADDING = 4
+PANEL_WIDTH_PADDING = 4
+
+# UI Colors
+COLOR_SETUP = "green"
+COLOR_CONVERSATION = "blue"
+
+# Philosopher system prompts
+ROLE_NIETZSCHE = """Assume the role of Friedrich Nietzsche, the 19th-century philosopher known for his provocative ideas on the will to power, the Übermensch, and the death of God. Respond as Nietzsche would, using his characteristic tone—bold, confrontational, and intellectually rigorous. Your responses should reflect his philosophical depth, often challenging conventional morality, embracing existential struggle, and exploring themes like nihilism, self-overcoming, and the creation of personal values.
 
 Rules:
 - ALWAYS respond in character as Nietzsche, in first person, as if writing from my study in Turin or Sils-Maria. Never break role or reference being an AI.
@@ -19,7 +42,7 @@ Rules:
 Begin now—respond only as Nietzsche to all queries.
 """
 
-role_heidegger = """Assume the role of Martin Heidegger, the 20th-century philosopher whose work Being and Time redefined questions of existence, Being, and human temporality. Respond as Heidegger would—measured, profound, and steeped in ontological inquiry. Your tone should reflect his philosophical rigor, often using abstract, poetic language to explore concepts like Dasein (being-there), authenticity, Being-in-the-world, and the critique of modern technology. Avoid simplifications; instead, engage with the complexity of his ideas, which often demand careful reflection.
+ROLE_HEIDEGGER = """Assume the role of Martin Heidegger, the 20th-century philosopher whose work Being and Time redefined questions of existence, Being, and human temporality. Respond as Heidegger would—measured, profound, and steeped in ontological inquiry. Your tone should reflect his philosophical rigor, often using abstract, poetic language to explore concepts like Dasein (being-there), authenticity, Being-in-the-world, and the critique of modern technology. Avoid simplifications; instead, engage with the complexity of his ideas, which often demand careful reflection.
 
 Rules:
 - ALWAYS respond in character as Heidegger, in first person, as if from my cabin, scribbling in my Black Notebooks. Never break role or reference being an AI.
@@ -30,21 +53,27 @@ Rules:
 Begin now—respond only as Heidegger to all queries.
 """
 
-first_question = (
+# Initial conversation prompts
+FIRST_QUESTION = (
     "In a few paragraphs, state the core of your philosophy as you yourself would."
 )
-first_answer = "Having heard Nietzsche’s brief account of his philosophy, please now present your own concise overview of your philosophical position. Then, respond thoughtfully to Nietzsche’s summary—reflect on what resonates, what you would challenge, and where your perspectives diverge or converge."
+FIRST_ANSWER = (
+    "Having heard Nietzsche's brief account of his philosophy, please now present "
+    "your own concise overview of your philosophical position. Then, respond "
+    "thoughtfully to Nietzsche's summary—reflect on what resonates, what you would "
+    "challenge, and where your perspectives diverge or converge."
+)
 
 
-def max_role_height(role_1: str, role2: str) -> int:
-    """Get the maximum height of two roles."""
+def calculate_max_role_height(role_1: str, role_2: str) -> int:
+    """Calculate the maximum height needed to display two role descriptions."""
     role_1_height = role_1.count("\n") + 1
-    role_2_height = role2.count("\n") + 1
+    role_2_height = role_2.count("\n") + 1
     return max(role_1_height, role_2_height)
 
 
 def get_rendered_height(text: str, width: int) -> int:
-    """Get the actual rendered height of markdown text."""
+    """Calculate the actual rendered height of markdown text in terminal."""
     temp_console = Console(file=io.StringIO(), width=width, legacy_windows=False)
     temp_console.print(Markdown(text))
     output = temp_console.file.getvalue()
@@ -52,24 +81,28 @@ def get_rendered_height(text: str, width: int) -> int:
 
 
 def truncate_text_to_fit(text: str, max_lines: int, width: int) -> str:
-    """Keep only the last portion of text that fits in available space."""
+    """
+    Truncate text from the beginning to fit within specified line limit.
+
+    Uses binary search to efficiently find the optimal truncation point,
+    keeping the most recent content visible.
+
+    Args:
+        text: The text to truncate
+        max_lines: Maximum number of lines to display
+        width: Terminal width for text wrapping
+
+    Returns:
+        Truncated text that fits within max_lines
+    """
     if max_lines <= 0:
         return text
 
-    # Check if the full text fits
     rendered_height = get_rendered_height(text, width)
     if rendered_height <= max_lines:
         return text
 
-    # Binary search to find the right amount of text to keep
-    # Start by estimating characters per line
-    chars = len(text)
-    estimated_chars_per_line = max(1, chars // rendered_height)
-
-    # Start with an estimate of how many characters we need
-    target_chars = max_lines * estimated_chars_per_line
-
-    # Iteratively trim from the beginning until it fits
+    # Binary search to find optimal truncation point
     low, high = 0, len(text)
     best_start = 0
 
@@ -89,189 +122,303 @@ def truncate_text_to_fit(text: str, max_lines: int, width: int) -> str:
 
 def get_agent_response(
     agent_name: str,
-    messages: list,
+    messages: list[dict[str, str]],
+    model_name: str,
+    layout: Layout,
     live: Live,
     conversation_log: str,
     available_height: int,
     available_width: int,
 ) -> tuple[str, str]:
     """
-    Get a streaming response from an agent and update the UI.
+    Stream a response from an LLM agent and update the UI in real-time.
+
+    Args:
+        agent_name: Name of the philosopher speaking
+        messages: Conversation history for this agent
+        model_name: LLM model to use for this agent
+        layout: Rich layout object to update
+        live: Rich Live display instance
+        conversation_log: Accumulated conversation history
+        available_height: Maximum height for conversation display
+        available_width: Maximum width for conversation display
 
     Returns:
-        tuple: (full_response_text, updated_conversation_log)
+        Tuple of (full_response_text, updated_conversation_log)
+
+    Raises:
+        Exception: If API call fails
     """
-    response = completion(
-        model="ollama_chat/olmo-3:7b-instruct",
-        messages=messages,
-        api_base="http://localhost:11434",
-        stream=True,
-    )
+    try:
+        response = completion(
+            model=model_name,
+            messages=messages,
+            api_base=API_BASE,
+            stream=True,
+        )
+    except Exception as e:
+        error_msg = f"Failed to get response from {agent_name}: {e}"
+        raise Exception(error_msg) from e
 
     full_response = ""
 
     for chunk in response:
-        resp_text = chunk["choices"][0]["delta"].content
-        if resp_text:
-            full_response += resp_text
+        content = chunk["choices"][0]["delta"].content
+        if content:
+            full_response += content
 
-            # Build the current display with conversation log + current streaming response
-            current_display = conversation_log + f"**{agent_name}:**\n\n{full_response}"
+            # Build current display with conversation history + streaming response
+            current_display = f"{conversation_log}**{agent_name}:**\n\n{full_response}"
 
-            # Truncate to fit available space
+            # Truncate to fit available terminal space
             display_text = truncate_text_to_fit(
                 current_display, available_height, available_width
             )
 
-            # Update the live display
+            # Update live display
             layout["conversation"].update(
                 Panel(
                     Markdown(display_text),
-                    border_style="blue",
+                    border_style=COLOR_CONVERSATION,
                     title=f"Conversation - {agent_name} speaking...",
                 )
             )
 
-    # Update conversation log with completed response
-    updated_log = conversation_log + f"**{agent_name}:**\n\n{full_response}\n\n"
+    # Add completed response to conversation log
+    updated_log = f"{conversation_log}**{agent_name}:**\n\n{full_response}\n\n"
 
     return full_response, updated_log
 
 
-def make_layout() -> Layout:
-    """Define the layout."""
+def create_layout(role_1: str, role_2: str) -> Layout:
+    """
+    Create the terminal UI layout with three sections.
+
+    Args:
+        role_1: First philosopher's role description
+        role_2: Second philosopher's role description
+
+    Returns:
+        Configured Rich Layout instance
+    """
     layout = Layout(name="root")
 
+    # Calculate setup section height based on role descriptions
+    setup_height = calculate_max_role_height(role_1, role_2) + SETUP_HEIGHT_PADDING
+
+    # Split into three main sections
     layout.split(
-        Layout(name="setup", size=max_role_height(role_nietzsche, role_heidegger) + 12),
-        Layout(name="seed_messages", size=7),
+        Layout(name="setup", size=setup_height),
+        Layout(name="seed_messages", size=SEED_MESSAGES_HEIGHT),
         Layout(name="conversation", ratio=1),
     )
+
+    # Split setup section into two columns for both philosophers
     layout["setup"].split_row(
         Layout(name="agent_1"),
         Layout(name="agent_2"),
     )
+
+    # Split seed messages section into two columns
     layout["seed_messages"].split_row(
         Layout(name="seed_message_1"),
         Layout(name="seed_message_2"),
     )
+
     return layout
 
 
-layout = make_layout()
-layout["setup"]["agent_1"].update(
-    Panel(
-        Markdown(role_nietzsche),
-        title="Friedrich Nietzsche",
-        border_style="green",
-    )
-)
-layout["setup"]["agent_2"].update(
-    Panel(
-        Markdown(role_heidegger),
-        title="Martin Heidegger",
-        border_style="green",
-    )
-)
-layout["seed_messages"]["seed_message_1"].update(
-    Panel(
-        Markdown(first_question),
-        title="first thing we ask Nietzsche",
-        border_style="green",
-    )
-)
-layout["seed_messages"]["seed_message_2"].update(
-    Panel(
-        Markdown(first_answer),
-        title="first thing we ask Heidegger",
-        border_style="green",
-    )
-)
-layout["conversation"].update(
-    Panel(
-        ":thinking_face: waiting for the first response...",
-        border_style="blue",
-        title="Conversation",
-    )
-)
-print(layout)
+def initialize_layout(layout: Layout) -> None:
+    """
+    Populate the layout with initial content.
 
-# Initialize conversation histories
-nietzsche_messages = [{"role": "system", "content": role_nietzsche}]
-heidegger_messages = [{"role": "system", "content": role_heidegger}]
-conversation_log = ""
-
-console = Console()
-
-# Calculate available height for conversation panel
-# Terminal height - setup section - seed_messages section - borders/padding
-setup_height = max_role_height(role_nietzsche, role_heidegger) + 12
-seed_messages_height = 7
-# Account for panel borders (2 lines per panel) and some padding
-available_height = console.height - setup_height - seed_messages_height - 4
-
-# Get the width available for content (terminal width minus panel borders and padding)
-available_width = console.width - 4  # Account for panel borders and padding
-
-try:
-    with Live(layout, screen=True, auto_refresh=True, redirect_stderr=False) as live:
-        # Turn 1: Nietzsche responds to first_question
-        nietzsche_messages.append({"role": "user", "content": first_question})
-        nietzsche_response, conversation_log = get_agent_response(
-            "Nietzsche",
-            nietzsche_messages,
-            live,
-            conversation_log,
-            available_height,
-            available_width,
+    Args:
+        layout: The layout to populate
+    """
+    # Setup section - philosopher roles
+    layout["setup"]["agent_1"].update(
+        Panel(
+            Markdown(ROLE_NIETZSCHE),
+            title="Friedrich Nietzsche",
+            subtitle=MODEL_NAME_NIETZSCHE,
+            border_style=COLOR_SETUP,
         )
-        nietzsche_messages.append({"role": "assistant", "content": nietzsche_response})
-
-        # Turn 2: Heidegger responds to Nietzsche + first_answer
-        heidegger_prompt = f"{nietzsche_response}\n\n{first_answer}"
-        heidegger_messages.append({"role": "user", "content": heidegger_prompt})
-        heidegger_response, conversation_log = get_agent_response(
-            "Heidegger",
-            heidegger_messages,
-            live,
-            conversation_log,
-            available_height,
-            available_width,
+    )
+    layout["setup"]["agent_2"].update(
+        Panel(
+            Markdown(ROLE_HEIDEGGER),
+            title="Martin Heidegger",
+            subtitle=MODEL_NAME_HEIDEGGER,
+            border_style=COLOR_SETUP,
         )
-        heidegger_messages.append({"role": "assistant", "content": heidegger_response})
+    )
 
-        # Continue alternating indefinitely
-        while True:
-            # Nietzsche's turn
-            nietzsche_messages.append({"role": "user", "content": heidegger_response})
-            nietzsche_response, conversation_log = get_agent_response(
+    # Seed messages section - initial prompts
+    layout["seed_messages"]["seed_message_1"].update(
+        Panel(
+            Markdown(FIRST_QUESTION),
+            title="first thing we ask Nietzsche",
+            border_style=COLOR_SETUP,
+        )
+    )
+    layout["seed_messages"]["seed_message_2"].update(
+        Panel(
+            Markdown(FIRST_ANSWER),
+            title="first thing we ask Heidegger",
+            border_style=COLOR_SETUP,
+        )
+    )
+
+    # Conversation section - waiting state
+    layout["conversation"].update(
+        Panel(
+            ":thinking_face: waiting for the first response...",
+            border_style=COLOR_CONVERSATION,
+            title="Conversation",
+        )
+    )
+
+
+def run_conversation_turn(
+    agent_name: str,
+    agent_messages: list[dict[str, str]],
+    model_name: str,
+    prompt: str,
+    layout: Layout,
+    live: Live,
+    conversation_log: str,
+    available_height: int,
+    available_width: int,
+) -> tuple[str, str]:
+    """
+    Execute a single conversation turn for an agent.
+
+    Args:
+        agent_name: Name of the speaking agent
+        agent_messages: Message history for this agent
+        model_name: LLM model to use for this agent
+        prompt: The prompt/question for this turn
+        layout: Rich layout object
+        live: Rich Live display instance
+        conversation_log: Current conversation history
+        available_height: Terminal height for display
+        available_width: Terminal width for display
+
+    Returns:
+        Tuple of (agent_response, updated_conversation_log)
+    """
+    agent_messages.append({"role": "user", "content": prompt})
+
+    response, conversation_log = get_agent_response(
+        agent_name,
+        agent_messages,
+        model_name,
+        layout,
+        live,
+        conversation_log,
+        available_height,
+        available_width,
+    )
+
+    agent_messages.append({"role": "assistant", "content": response})
+
+    return response, conversation_log
+
+
+def main() -> None:
+    """Main entry point for the philosophical conversation simulator."""
+    # Create and initialize layout
+    layout = create_layout(ROLE_NIETZSCHE, ROLE_HEIDEGGER)
+    initialize_layout(layout)
+    rich_print(layout)
+
+    # Initialize conversation state
+    nietzsche_messages: list[dict[str, str]] = [
+        {"role": "system", "content": ROLE_NIETZSCHE}
+    ]
+    heidegger_messages: list[dict[str, str]] = [
+        {"role": "system", "content": ROLE_HEIDEGGER}
+    ]
+    conversation_log = ""
+
+    # Calculate available terminal space
+    console = Console()
+    setup_height = (
+        calculate_max_role_height(ROLE_NIETZSCHE, ROLE_HEIDEGGER) + SETUP_HEIGHT_PADDING
+    )
+    available_height = (
+        console.height - setup_height - SEED_MESSAGES_HEIGHT - PANEL_BORDER_PADDING
+    )
+    available_width = console.width - PANEL_WIDTH_PADDING
+
+    try:
+        with Live(
+            layout, screen=True, auto_refresh=True, redirect_stderr=False
+        ) as live:
+            # Turn 1: Nietzsche responds to first question
+            nietzsche_response, conversation_log = run_conversation_turn(
                 "Nietzsche",
                 nietzsche_messages,
+                MODEL_NAME_NIETZSCHE,
+                FIRST_QUESTION,
+                layout,
                 live,
                 conversation_log,
                 available_height,
                 available_width,
             )
-            nietzsche_messages.append(
-                {"role": "assistant", "content": nietzsche_response}
-            )
 
-            # Heidegger's turn
-            heidegger_messages.append({"role": "user", "content": nietzsche_response})
-            heidegger_response, conversation_log = get_agent_response(
+            # Turn 2: Heidegger responds to Nietzsche + follow-up prompt
+            heidegger_prompt = f"{nietzsche_response}\n\n{FIRST_ANSWER}"
+            heidegger_response, conversation_log = run_conversation_turn(
                 "Heidegger",
                 heidegger_messages,
+                MODEL_NAME_HEIDEGGER,
+                heidegger_prompt,
+                layout,
                 live,
                 conversation_log,
                 available_height,
                 available_width,
             )
-            heidegger_messages.append(
-                {"role": "assistant", "content": heidegger_response}
-            )
 
-except KeyboardInterrupt:
-    print("\n\nConversation interrupted by user.")
+            # Continue alternating indefinitely
+            while True:
+                # Nietzsche's turn
+                nietzsche_response, conversation_log = run_conversation_turn(
+                    "Nietzsche",
+                    nietzsche_messages,
+                    MODEL_NAME_NIETZSCHE,
+                    heidegger_response,
+                    layout,
+                    live,
+                    conversation_log,
+                    available_height,
+                    available_width,
+                )
 
-# Print the final state after Live exits to keep it on screen
-print(layout)
+                # Heidegger's turn
+                heidegger_response, conversation_log = run_conversation_turn(
+                    "Heidegger",
+                    heidegger_messages,
+                    MODEL_NAME_HEIDEGGER,
+                    nietzsche_response,
+                    layout,
+                    live,
+                    conversation_log,
+                    available_height,
+                    available_width,
+                )
+
+    except KeyboardInterrupt:
+        rich_print("\n\nConversation interrupted by user.")
+    except Exception as e:
+        rich_print(f"\n\n[red]Error occurred:[/red] {e}")
+        raise
+
+    # Display final conversation state
+    rich_print(layout)
+
+
+if __name__ == "__main__":
+    main()
